@@ -1,4 +1,4 @@
-.PHONY: install test run db-up db-down migrate
+.PHONY: install test run db-up db-down migrate worker
 
 install:
 	python -m pip install -e ".[dev]"
@@ -17,3 +17,6 @@ db-down:
 
 migrate:
 	alembic upgrade head
+
+worker:
+	python -m notification_service.cli worker --limit 10

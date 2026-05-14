@@ -63,6 +63,7 @@ make db-down
 - `make install`: 安装本地开发依赖。
 - `make migrate`: 执行 Alembic migration。
 - `make run`: 启动 FastAPI 开发服务。
+- `make worker`: 手动执行一次 worker polling。
 - `make test`: 运行 pytest。
 - `make db-down`: 停止本地 Docker Compose 服务。
 
@@ -105,6 +106,12 @@ curl -X POST http://localhost:8000/notifications \
 如果 `idempotency_key` 已存在，接口不会创建新记录，而是返回已有 notification。第一版只支持 `method = "POST"`，`target_url` 必须是 `http` 或 `https`。
 
 手动运行一次 worker：
+
+```bash
+make worker
+```
+
+或直接运行：
 
 ```bash
 python -m notification_service.cli worker --limit 10
@@ -349,6 +356,18 @@ status = pending AND next_retry_at <= now
 ### Python + FastAPI
 
 Python 适合快速实现清晰的业务流程，生态成熟，面试作业和 production-oriented MVP 都容易评审。FastAPI 提供类型友好的 HTTP API 开发体验，自动请求校验和 OpenAPI 文档对接口调试也很有帮助。
+
+### Python 性能边界与 worker 可替换性
+
+当前 MVP 的主要工作是 I/O-bound 的外部 HTTP 投递和数据库状态更新，不是 CPU 密集计算。Python + httpx 足以表达可靠投递核心链路，也便于快速补充测试和审查状态机。
+
+需要明确的是，Python worker 不是系统长期演进的唯一形态。如果未来通知量显著增长，瓶颈可能出现在数据库 polling、外部供应商限流、连接池、单进程 worker 吞吐或任务分发方式上。届时可以在不改变 API 和 PostgreSQL system of record 语义的前提下，把当前 worker 替换或扩展为：
+
+- 多进程或多实例 worker，并通过 `FOR UPDATE SKIP LOCKED` 安全领取任务。
+- 基于 Outbox Pattern + MQ 的 worker pool。
+- 更适合高吞吐场景的异步 Python worker 或其他语言实现。
+
+换句话说，当前 Python worker 是 MVP 的清晰实现，不是对未来运行时的绑定。
 
 ### PostgreSQL
 
