@@ -11,18 +11,19 @@
 环境要求：
 
 - Python 3.11+
-- Docker Compose
+- Docker / Docker Compose
 
-本地启动：
+从新 clone 的仓库启动本地环境：
 
 ```bash
 cp .env.example .env
-make install
 make db-up
+make install
 make migrate
-make test
 make run
 ```
+
+`make run` 会启动 FastAPI 开发服务并占用当前终端。后续 curl、worker 和测试命令建议在新的终端窗口中执行。
 
 健康检查：
 
@@ -36,6 +37,39 @@ curl http://localhost:8000/health
 {"status":"ok"}
 ```
 
+OpenAPI 文档：
+
+```text
+http://localhost:8000/docs
+```
+
+本地启动 API 后，可以通过 `/docs` 查看 FastAPI 自动生成的接口文档并手动调试请求。
+
+运行测试：
+
+```bash
+make test
+```
+
+停止本地 PostgreSQL：
+
+```bash
+make db-down
+```
+
+常用命令：
+
+- `make db-up`: 启动本地 PostgreSQL。
+- `make install`: 安装本地开发依赖。
+- `make migrate`: 执行 Alembic migration。
+- `make run`: 启动 FastAPI 开发服务。
+- `make test`: 运行 pytest。
+- `make db-down`: 停止本地 Docker Compose 服务。
+
+## Local Demo
+
+下面的 demo 不依赖真实外部供应商 API。`target_url` 使用 `http://127.0.0.1:9000/mock-notify` 作为本地 mock server 示例地址；如果没有启动对应 mock server，worker 会记录一次网络失败 attempt，并按照 retry policy 设置 `next_retry_at`，这也是当前系统需要可靠处理的真实失败场景。
+
 创建 notification：
 
 ```bash
@@ -45,7 +79,7 @@ curl -X POST http://localhost:8000/notifications \
     "idempotency_key": "order-123-inventory-notify",
     "source_system": "order-service",
     "event_type": "order.paid",
-    "target_url": "https://vendor.example.com/api/notify",
+    "target_url": "http://127.0.0.1:9000/mock-notify",
     "method": "POST",
     "headers": {
       "X-Source": "order-service"
@@ -69,6 +103,14 @@ curl -X POST http://localhost:8000/notifications \
 ```
 
 如果 `idempotency_key` 已存在，接口不会创建新记录，而是返回已有 notification。第一版只支持 `method = "POST"`，`target_url` 必须是 `http` 或 `https`。
+
+手动运行一次 worker：
+
+```bash
+python -m notification_service.cli worker --limit 10
+```
+
+Worker 会查询 `status = pending` 且 `next_retry_at <= now` 的 notification，按 `target_url` 发起 HTTP POST，并根据结果更新 notification 状态和写入 `delivery_attempts`。当前 worker 是简单单进程 polling；未来多 worker 并发领取任务时，可以把任务选择逻辑演进为 `FOR UPDATE SKIP LOCKED`。
 
 查询 notification 状态：
 
@@ -108,23 +150,6 @@ curl http://localhost:8000/notifications/1
 ```
 
 如果 notification 不存在，接口返回 `404 Not Found`。`attempts` 按 `created_at` 升序排列；`response_body_preview` 只返回已截断的响应摘要，不返回完整大响应。
-
-执行一次 worker polling：
-
-```bash
-python -m notification_service.cli worker --limit 10
-```
-
-Worker 会查询 `status = pending` 且 `next_retry_at <= now` 的 notification，按 `target_url` 发起 HTTP POST，并根据结果更新 notification 状态和写入 `delivery_attempts`。当前 worker 是简单单进程 polling；未来多 worker 并发领取任务时，可以把任务选择逻辑演进为 `FOR UPDATE SKIP LOCKED`。
-
-常用命令：
-
-- `make install`: 安装本地开发依赖。
-- `make test`: 运行 pytest。
-- `make run`: 启动 FastAPI 开发服务。
-- `make db-up`: 启动本地 PostgreSQL。
-- `make db-down`: 停止本地 Docker Compose 服务。
-- `make migrate`: 执行 Alembic migration。
 
 ## 1. Problem Understanding
 
