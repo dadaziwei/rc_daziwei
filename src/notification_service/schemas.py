@@ -28,3 +28,32 @@ class NotificationResponse(BaseModel):
     created_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class DeliveryAttemptResponse(BaseModel):
+    attempt_number: int
+    status_code: int | None
+    success: bool
+    error_message: str | None
+    response_body_preview: str | None
+    duration_ms: int
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class NotificationDetailResponse(BaseModel):
+    id: int
+    idempotency_key: str
+    source_system: str
+    event_type: str
+    target_url: str
+    method: str
+    status: str
+    attempt_count: int
+    max_attempts: int
+    next_retry_at: datetime | None
+    last_error: str | None
+    created_at: datetime
+    updated_at: datetime
+    attempts: list[DeliveryAttemptResponse]

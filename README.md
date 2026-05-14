@@ -70,6 +70,45 @@ curl -X POST http://localhost:8000/notifications \
 
 如果 `idempotency_key` 已存在，接口不会创建新记录，而是返回已有 notification。第一版只支持 `method = "POST"`，`target_url` 必须是 `http` 或 `https`。
 
+查询 notification 状态：
+
+```bash
+curl http://localhost:8000/notifications/1
+```
+
+示例响应：
+
+```json
+{
+  "id": 1,
+  "idempotency_key": "order-123-inventory-notify",
+  "source_system": "order-service",
+  "event_type": "order.paid",
+  "target_url": "https://vendor.example.com/api/notify",
+  "method": "POST",
+  "status": "pending",
+  "attempt_count": 1,
+  "max_attempts": 5,
+  "next_retry_at": "2026-05-14T14:01:00Z",
+  "last_error": "HTTP 500",
+  "created_at": "2026-05-14T14:00:00Z",
+  "updated_at": "2026-05-14T14:00:30Z",
+  "attempts": [
+    {
+      "attempt_number": 1,
+      "status_code": 500,
+      "success": false,
+      "error_message": "HTTP 500",
+      "response_body_preview": "vendor error response preview",
+      "duration_ms": 120,
+      "created_at": "2026-05-14T14:00:30Z"
+    }
+  ]
+}
+```
+
+如果 notification 不存在，接口返回 `404 Not Found`。`attempts` 按 `created_at` 升序排列；`response_body_preview` 只返回已截断的响应摘要，不返回完整大响应。
+
 执行一次 worker polling：
 
 ```bash

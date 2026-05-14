@@ -1,13 +1,17 @@
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, Depends, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Response, status
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from notification_service.database import get_db
-from notification_service.models import Notification
-from notification_service.schemas import NotificationCreate, NotificationResponse
+from notification_service.models import DeliveryAttempt, Notification
+from notification_service.schemas import (
+    NotificationCreate,
+    NotificationDetailResponse,
+    NotificationResponse,
+)
 
 router = APIRouter()
 
@@ -68,3 +72,38 @@ def create_notification(
     if not created:
         response.status_code = status.HTTP_200_OK
     return notification
+
+
+@router.get("/notifications/{notification_id}", response_model=NotificationDetailResponse)
+def get_notification(
+    notification_id: int,
+    db: Session = Depends(get_db),
+) -> dict[str, object]:
+    notification = db.get(Notification, notification_id)
+    if notification is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Notification not found")
+
+    attempts = list(
+        db.scalars(
+            select(DeliveryAttempt)
+            .where(DeliveryAttempt.notification_id == notification.id)
+            .order_by(DeliveryAttempt.created_at.asc(), DeliveryAttempt.attempt_number.asc())
+        )
+    )
+
+    return {
+        "id": notification.id,
+        "idempotency_key": notification.idempotency_key,
+        "source_system": notification.source_system,
+        "event_type": notification.event_type,
+        "target_url": notification.target_url,
+        "method": notification.method,
+        "status": notification.status,
+        "attempt_count": notification.attempt_count,
+        "max_attempts": notification.max_attempts,
+        "next_retry_at": notification.next_retry_at,
+        "last_error": notification.last_error,
+        "created_at": notification.created_at,
+        "updated_at": notification.updated_at,
+        "attempts": attempts,
+    }
