@@ -8,6 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
 from notification_service.models import DeliveryAttempt, Notification
+from notification_service.repositories.delivery_attempts import MAX_RESPONSE_BODY_PREVIEW_LENGTH
 from notification_service.worker import HTTP_TIMEOUT_SECONDS, process_due_notifications, process_one_notification
 
 
@@ -125,6 +126,30 @@ def test_5xx_reschedules_pending_notification(
     assert attempts[0].response_body_preview == "vendor failed"
 
 
+def test_retryable_failure_sets_next_retry_at_to_future_delay(
+    db_session_factory: sessionmaker[Session],
+) -> None:
+    with db_session_factory() as db:
+        notification = create_due_notification(db)
+
+    process_one_notification(
+        notification.id,
+        session_factory=db_session_factory,
+        request_func=mock_response(503, "try later"),
+        now_func=now,
+    )
+
+    updated = get_notification(db_session_factory, notification.id)
+    expected_next_retry_at = FIXED_NOW + timedelta(minutes=1)
+    actual_next_retry_at = updated.next_retry_at
+    assert actual_next_retry_at is not None
+    if actual_next_retry_at.tzinfo is None:
+        expected_next_retry_at = expected_next_retry_at.replace(tzinfo=None)
+
+    assert actual_next_retry_at == expected_next_retry_at
+    assert actual_next_retry_at > expected_next_retry_at - timedelta(seconds=1)
+
+
 def test_timeout_reschedules_pending_notification(
     db_session_factory: sessionmaker[Session],
 ) -> None:
@@ -154,6 +179,34 @@ def test_timeout_reschedules_pending_notification(
     assert "timed out" in (attempts[0].error_message or "")
 
 
+def test_network_error_is_retryable_and_records_attempt(
+    db_session_factory: sessionmaker[Session],
+) -> None:
+    with db_session_factory() as db:
+        notification = create_due_notification(db)
+
+    def network_error_request(*args: Any, **kwargs: Any) -> httpx.Response:
+        raise httpx.ConnectError("connection failed")
+
+    process_one_notification(
+        notification.id,
+        session_factory=db_session_factory,
+        request_func=network_error_request,
+        now_func=now,
+    )
+
+    updated = get_notification(db_session_factory, notification.id)
+    attempts = get_attempts(db_session_factory, notification.id)
+
+    assert updated.status == "pending"
+    assert updated.next_retry_at is not None
+    assert "connection failed" in (updated.last_error or "")
+    assert len(attempts) == 1
+    assert attempts[0].status_code is None
+    assert attempts[0].success is False
+    assert "connection failed" in (attempts[0].error_message or "")
+
+
 def test_400_marks_notification_failed(
     db_session_factory: sessionmaker[Session],
 ) -> None:
@@ -177,6 +230,34 @@ def test_400_marks_notification_failed(
     assert len(attempts) == 1
     assert attempts[0].status_code == 400
     assert attempts[0].success is False
+
+
+def test_worker_records_complete_delivery_attempt_and_truncates_preview(
+    db_session_factory: sessionmaker[Session],
+) -> None:
+    response_body = "x" * (MAX_RESPONSE_BODY_PREVIEW_LENGTH + 25)
+    with db_session_factory() as db:
+        notification = create_due_notification(db)
+
+    process_one_notification(
+        notification.id,
+        session_factory=db_session_factory,
+        request_func=mock_response(502, response_body),
+        now_func=now,
+    )
+
+    attempts = get_attempts(db_session_factory, notification.id)
+
+    assert len(attempts) == 1
+    attempt = attempts[0]
+    assert attempt.notification_id == notification.id
+    assert attempt.attempt_number == 1
+    assert attempt.status_code == 502
+    assert attempt.success is False
+    assert attempt.error_message == "HTTP 502"
+    assert attempt.response_body_preview == "x" * MAX_RESPONSE_BODY_PREVIEW_LENGTH
+    assert attempt.duration_ms >= 0
+    assert attempt.created_at is not None
 
 
 def test_retryable_failure_reaching_max_attempts_marks_failed(

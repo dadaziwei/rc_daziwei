@@ -1,7 +1,9 @@
 from typing import Any
 
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
 from notification_service.models import Notification
@@ -77,6 +79,90 @@ def test_duplicate_idempotency_key_returns_existing_notification(
     assert second_response.status_code == 200
     assert second_response.json() == first_response.json()
     assert count_notifications(db_session_factory) == 1
+
+
+def test_duplicate_idempotency_key_preserves_original_notification(
+    client: TestClient,
+    db_session_factory: sessionmaker[Session],
+) -> None:
+    first_response = client.post("/notifications", json=notification_payload())
+
+    for _ in range(3):
+        duplicate_response = client.post(
+            "/notifications",
+            json=notification_payload(
+                source_system="changed-service",
+                event_type="order.cancelled",
+                headers={"X-Source": "changed-service"},
+                body={"order_id": "changed"},
+            ),
+        )
+        assert duplicate_response.status_code == 200
+        assert duplicate_response.json() == first_response.json()
+
+    with db_session_factory() as db:
+        notification = db.scalar(select(Notification))
+
+    assert notification is not None
+    assert count_notifications(db_session_factory) == 1
+    assert notification.source_system == "order-service"
+    assert notification.event_type == "order.paid"
+    assert notification.headers == {"X-Source": "order-service"}
+    assert notification.body == {"order_id": "123", "sku": "A001", "quantity": 1}
+
+
+def test_idempotency_key_unique_constraint_protects_create_race(
+    db_session_factory: sessionmaker[Session],
+) -> None:
+    with db_session_factory() as db:
+        db.add(
+            Notification(
+                idempotency_key="same-key",
+                source_system="order-service",
+                event_type="order.paid",
+                target_url="https://vendor.example.com/api/notify",
+                method="POST",
+                headers={},
+                body={"order_id": "123"},
+                status="pending",
+            )
+        )
+        db.commit()
+
+        db.add(
+            Notification(
+                idempotency_key="same-key",
+                source_system="another-service",
+                event_type="order.paid",
+                target_url="https://vendor.example.com/api/notify",
+                method="POST",
+                headers={},
+                body={"order_id": "456"},
+                status="pending",
+            )
+        )
+
+        with pytest.raises(IntegrityError):
+            db.commit()
+
+        db.rollback()
+
+    assert count_notifications(db_session_factory) == 1
+
+
+def test_create_notification_does_not_call_external_http(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_if_called(*args: Any, **kwargs: Any) -> None:
+        raise AssertionError("POST /notifications must not call external HTTP")
+
+    monkeypatch.setattr("httpx.request", fail_if_called)
+
+    response = client.post("/notifications", json=notification_payload())
+
+    assert response.status_code == 201
+    assert response.json()["status"] == "pending"
 
 
 def test_invalid_target_url_returns_validation_error(client: TestClient) -> None:
