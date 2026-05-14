@@ -21,11 +21,32 @@ services:
     volumes:
       - .:/app
     environment:
-      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://notification:notification@db:5432/notification_service}
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-notification}:${POSTGRES_PASSWORD:-notification}@db:5432/${POSTGRES_DB:-notification_service}
+      HTTP_TIMEOUT_SECONDS: ${HTTP_TIMEOUT_SECONDS:-5}
+      MAX_ATTEMPTS: ${MAX_ATTEMPTS:-5}
+      TARGET_HOST_ALLOWLIST: ${TARGET_HOST_ALLOWLIST:-}
     command: >
       sh -c "pip install -e . && uvicorn notification_service.main:app --host 0.0.0.0 --port 8000"
     ports:
       - "${APP_PORT:-8000}:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  worker:
+    image: python:3.11-slim
+    working_dir: /app
+    volumes:
+      - .:/app
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-notification}:${POSTGRES_PASSWORD:-notification}@db:5432/${POSTGRES_DB:-notification_service}
+      HTTP_TIMEOUT_SECONDS: ${HTTP_TIMEOUT_SECONDS:-5}
+      WORKER_BATCH_SIZE: ${WORKER_BATCH_SIZE:-10}
+      WORKER_POLL_INTERVAL_SECONDS: ${WORKER_POLL_INTERVAL_SECONDS:-5}
+      MAX_ATTEMPTS: ${MAX_ATTEMPTS:-5}
+      TARGET_HOST_ALLOWLIST: ${TARGET_HOST_ALLOWLIST:-}
+    command: >
+      sh -c "pip install -e . && alembic upgrade head && python -m notification_service.cli worker --limit $${WORKER_BATCH_SIZE}"
     depends_on:
       db:
         condition: service_healthy

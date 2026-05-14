@@ -4,6 +4,7 @@ from typing import Any
 from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, JSON, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
+from notification_service.constants import NotificationStatus
 from notification_service.database import Base
 
 
@@ -24,7 +25,7 @@ class Notification(Base):
     method: Mapped[str] = mapped_column(String(10), nullable=False)
     headers: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
     body: Mapped[Any] = mapped_column(JSON, nullable=False)
-    status: Mapped[str] = mapped_column(String(50), nullable=False, default="pending")
+    status: Mapped[str] = mapped_column(String(50), nullable=False, default=NotificationStatus.PENDING.value)
     attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     max_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=5, server_default="5")
     next_retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

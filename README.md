@@ -63,9 +63,15 @@ make db-down
 - `make install`: 安装本地开发依赖。
 - `make migrate`: 执行 Alembic migration。
 - `make run`: 启动 FastAPI 开发服务。
-- `make worker`: 手动执行一次 worker polling。
+- `make worker`: 启动持续 polling 的 worker 进程。
 - `make test`: 运行 pytest。
 - `make db-down`: 停止本地 Docker Compose 服务。
+
+Docker Compose 也包含 `worker` service；需要本地同时运行 API 和 worker 时，可以使用：
+
+```bash
+docker compose up api worker
+```
 
 ## Local Demo
 
@@ -117,7 +123,7 @@ make worker
 python -m notification_service.cli worker --limit 10
 ```
 
-Worker 会查询 `status = pending` 且 `next_retry_at <= now` 的 notification，按 `target_url` 发起 HTTP POST，并根据结果更新 notification 状态和写入 `delivery_attempts`。当前 worker 是简单单进程 polling；未来多 worker 并发领取任务时，可以把任务选择逻辑演进为 `FOR UPDATE SKIP LOCKED`。
+Worker 会查询 `status = pending` 且 `next_retry_at <= now` 的 notification，先 claim 为 `processing`，再按 `target_url` 发起 HTTP POST，并根据结果更新 notification 状态和写入 `delivery_attempts`。CLI 默认持续 polling；如果只想处理一批任务，可以使用 `python -m notification_service.cli worker --limit 10 --once`。
 
 查询 notification 状态：
 
@@ -133,7 +139,7 @@ curl http://localhost:8000/notifications/1
   "idempotency_key": "order-123-inventory-notify",
   "source_system": "order-service",
   "event_type": "order.paid",
-  "target_url": "https://vendor.example.com/api/notify",
+  "target_url": "http://127.0.0.1:9000/mock-notify",
   "method": "POST",
   "status": "pending",
   "attempt_count": 1,
@@ -283,8 +289,9 @@ PostgreSQL 是 system of record。它保存通知任务当前状态、重试调�
 
 当前 worker 提供两个核心入口：
 
-- `process_due_notifications(limit=10)`: 查询 due notifications 并逐条处理。
+- `process_due_notifications(limit=10)`: claim 一批 due notifications 并逐条处理。
 - `process_one_notification(notification_id)`: 处理指定 notification。
+- `run_worker_loop(...)`: 按 polling interval 持续运行，支持 SIGINT/SIGTERM graceful shutdown。
 
 CLI 用法：
 
@@ -292,13 +299,13 @@ CLI 用法：
 python -m notification_service.cli worker --limit 10
 ```
 
-当前版本为了保持 MVP 简单，任务选择使用普通数据库查询：
+当前版本在 PostgreSQL 中使用 `FOR UPDATE SKIP LOCKED` 领取任务，并把任务状态从 `pending` 更新为 `processing` 后提交，再执行外部 HTTP 投递：
 
 ```text
-status = pending AND next_retry_at <= now
+pending + due -> processing -> success / pending / failed
 ```
 
-这个结构保留了未来演进空间：当需要多个 worker 横向扩展时，可以把 due notification 选择逻辑替换为基于 PostgreSQL 行级锁的领取方式，例如 `FOR UPDATE SKIP LOCKED`，避免多个 worker 同时处理同一个 notification。
+这个设计避免多个 worker 同时领取同一条 due notification。当前仍保留简单实现边界：如果 worker 在 `processing` 状态崩溃，暂未实现 processing 超时回收；这被列入 Known Limitations。
 
 ## 7. Data Model Draft
 
@@ -315,7 +322,7 @@ status = pending AND next_retry_at <= now
 - `http_method`: HTTP 方法，第一版可限制为 `POST`。
 - `headers`: 需要发送给供应商的 HTTP headers，注意不能记录敏感密钥明文。
 - `payload`: 请求体 JSON。
-- `status`: 当前状态，例如 `pending`、`success`、`failed`。
+- `status`: 当前状态，例如 `pending`、`processing`、`success`、`failed`。
 - `attempt_count`: 已执行投递次数。
 - `max_attempts`: 最大投递次数。
 - `next_retry_at`: 下次可投递时间。
@@ -388,6 +395,18 @@ pytest 适合覆盖核心行为测试，例如持久化后返回、幂等创建�
 ### Docker Compose
 
 Docker Compose 用于本地启动 PostgreSQL 和服务，降低评审者运行成本。第一版不引入 Kubernetes，避免把部署复杂度提前带入 MVP。
+
+### 配置项
+
+当前 MVP 使用环境变量外置关键运行参数：
+
+- `HTTP_TIMEOUT_SECONDS`: 外部 HTTP 请求超时。
+- `WORKER_BATCH_SIZE`: worker 每轮 claim 的最大任务数。
+- `WORKER_POLL_INTERVAL_SECONDS`: worker polling 间隔。
+- `MAX_ATTEMPTS`: 新 notification 默认最大投递次数。
+- `TARGET_HOST_ALLOWLIST`: 可选的目标 host/domain allowlist，逗号分隔；为空时本地 MVP 不启用 allowlist。
+
+`TARGET_HOST_ALLOWLIST` 用于表达 SSRF 风险边界。当前本地 demo 默认不启用 allowlist，便于调试 mock server；生产环境必须配置 allowlist、密钥管理和更严格的出站网络控制。
 
 ## 9. Database and Message Queue Trade-offs
 
@@ -471,12 +490,67 @@ FastAPI -> PostgreSQL + outbox_events -> Outbox Dispatcher -> Kafka/RabbitMQ/SQS
 
 这个设计避免“数据库提交成功但 MQ 发布失败”或“MQ 发布成功但数据库事务回滚”的一致性问题。
 
-## 10. Future Evolution
+## 10. Known Limitations
+
+当前版本已经支持 PostgreSQL `FOR UPDATE SKIP LOCKED` 的多 worker 任务领取，但仍然是 MVP：
+
+- 没有 processing 超时回收机制；如果 worker 在 claim 后进程崩溃，可能需要人工把卡住的 `processing` 任务恢复为 `pending`。
+- 没有管理后台；当前通过 API 和数据库查询完成排查。
+- 没有供应商模板系统；不同供应商的签名、字段映射和响应语义解析仍是未来扩展。
+- 没有复杂鉴权和多租户权限系统；当前假设是内部服务。
+- 不保证 exactly-once；外部 HTTP 超时后仍可能重复投递。
+- 本地默认未启用 `TARGET_HOST_ALLOWLIST`；生产必须补 SSRF 防护、出站网络策略、密钥管理、metrics/alerting。
+- PostgreSQL 集成测试默认需要显式设置 `POSTGRES_TEST_DATABASE_URL`，避免误删非测试库。
+
+## 11. Operational Runbook
+
+查看积压任务：
+
+```sql
+SELECT id, source_system, event_type, next_retry_at, attempt_count
+FROM notifications
+WHERE status = 'pending'
+ORDER BY next_retry_at ASC;
+```
+
+查看失败任务：
+
+```sql
+SELECT id, source_system, event_type, attempt_count, max_attempts, last_error
+FROM notifications
+WHERE status = 'failed'
+ORDER BY updated_at DESC;
+```
+
+查看卡在 processing 的任务：
+
+```sql
+SELECT id, source_system, event_type, updated_at
+FROM notifications
+WHERE status = 'processing'
+ORDER BY updated_at ASC;
+```
+
+手动重试 failed notification：
+
+```bash
+curl -X POST http://localhost:8000/notifications/1/retry
+```
+
+手动重试只允许 `failed` 状态。它会把任务重置为 `pending` 并把 `next_retry_at` 设置为当前时间，但不会重置 `attempt_count`，这样历史投递次数和失败记录仍然保留。由于 `attempt_count` 不重置，如果再次失败，系统不会重新开启完整自动重试周期；这是有意的保守选择。
+
+判断供应商长期不可用：
+
+- 同一 `target_url` 或 host 的 `5xx` / timeout attempt 持续增加。
+- `pending` 积压持续增长，且 `next_retry_at` 不断被推后。
+- `failed` 任务集中来自同一供应商。
+- worker 结构化日志中同一 host 的 `retryable=true` 持续出现。
+
+## 12. Future Evolution
 
 后续演进应围绕实际瓶颈逐步展开，而不是提前堆叠基础设施。
 
-- 多 worker：提高投递吞吐，但需要确保任务领取互斥。
-- `FOR UPDATE SKIP LOCKED`：支持多个 worker 从 PostgreSQL 并发领取 due notifications。
+- processing 超时回收：把长时间卡住的 `processing` 任务安全恢复为 `pending`。
 - Dead-letter queue：对自动重试耗尽的任务提供隔离、排查和人工处理入口。
 - Vendor-level rate limit：按供应商维度限制并发和 QPS，避免触发对方限流或封禁。
 - Circuit breaker：当某个供应商持续失败时临时熔断，减少无效请求和重试风暴。

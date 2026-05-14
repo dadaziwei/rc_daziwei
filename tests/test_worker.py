@@ -7,9 +7,15 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
+from notification_service.constants import NotificationStatus
 from notification_service.models import DeliveryAttempt, Notification
 from notification_service.repositories.delivery_attempts import MAX_RESPONSE_BODY_PREVIEW_LENGTH
-from notification_service.worker import HTTP_TIMEOUT_SECONDS, process_due_notifications, process_one_notification
+from notification_service.worker import (
+    HTTP_TIMEOUT_SECONDS,
+    claim_due_notifications,
+    process_due_notifications,
+    process_one_notification,
+)
 
 
 FIXED_NOW = datetime(2026, 5, 14, 12, 0, 0, tzinfo=UTC)
@@ -309,6 +315,25 @@ def test_process_due_notifications_writes_attempt_for_each_processed_notificatio
     assert processed == 2
     assert len(get_attempts(db_session_factory, first_id)) == 1
     assert len(get_attempts(db_session_factory, second_id)) == 1
+
+
+def test_claim_due_notifications_marks_rows_processing(
+    db_session_factory: sessionmaker[Session],
+) -> None:
+    with db_session_factory() as db:
+        first = create_due_notification(db, idempotency_key="first")
+        second = create_due_notification(db, idempotency_key="second")
+        claimed_ids = claim_due_notifications(db, limit=1, current_time=FIXED_NOW)
+        db.commit()
+
+        assert claimed_ids == [first.id]
+        assert db.get(Notification, first.id).status == NotificationStatus.PROCESSING.value
+        assert db.get(Notification, second.id).status == NotificationStatus.PENDING.value
+
+        next_claimed_ids = claim_due_notifications(db, limit=10, current_time=FIXED_NOW)
+        db.commit()
+
+        assert next_claimed_ids == [second.id]
 
 
 def test_worker_uses_mocked_httpx_request(

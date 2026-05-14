@@ -25,6 +25,9 @@ AI 在本项目中主要提供了以下帮助：
 - 没有做管理后台：第一版只提供 API 和数据库记录，不实现可视化运营后台、人工重放页面或复杂筛选界面。
 - 没有引入 Kubernetes / Prometheus / Grafana：这些属于生产部署和观测体系的后续建设，不进入当前作业实现范围。
 - 没有做过早的多租户权限系统：当前项目假设是内部服务，第一版不做租户隔离、用户系统、角色权限或鉴权链路。
+- 没有采纳 Celery/Redis 作为第一版 worker：AI 曾容易把“后台任务”联想到 Celery/Redis，但本项目当前用 PostgreSQL-backed job queue 就能表达持久化、幂等、重试和状态查询，额外引入 Celery/Redis 会增加运行组件和一致性边界。
+- 没有采纳“exactly-once”式表述：AI 早期容易把可靠投递描述得过强，后续被修正为 at-least-once，并明确说明 HTTP timeout 后无法判断对方是否已处理。
+- 没有保留最初的简单 worker 查询方式：AI 生成的 worker 初稿只是查询 pending id 再逐个处理，这在多 worker 下可能重复投递；后续被修正为 `processing` 状态加 PostgreSQL `FOR UPDATE SKIP LOCKED` claim。
 
 这些能力并不是没有价值，而是不适合放进当前第一版。
 
@@ -55,6 +58,9 @@ Kafka/RabbitMQ 是未来演进项，不是第一版必需项。如果第一版�
 - 选择 API 和 worker 分离：API 只负责持久化，worker 负责外部 HTTP 投递。
 - 选择把 Kafka/RabbitMQ/SQS 写入未来演进，而不是当前实现。
 - 选择控制功能边界，不做管理后台、多租户权限、复杂供应商模板系统或 Kubernetes 部署。
+- 选择把 worker 从“一次性脚本”修正为可持续运行进程，并补 graceful shutdown、结构化日志和 Docker Compose worker service。
+- 选择增加 failed notification 的手动 retry API，但保留 `attempt_count`，避免人工重试抹掉历史投递事实。
+- 选择把 SSRF 风险写入 README，并提供可选 `TARGET_HOST_ALLOWLIST`，但不在本地 demo 默认启用复杂安全策略。
 
 这些决策体现的是工程取舍：先把可靠投递的最小闭环做正确，再根据真实瓶颈演进。
 

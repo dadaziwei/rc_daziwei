@@ -6,6 +6,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
+from notification_service.constants import NotificationStatus
 from notification_service.models import Notification
 
 
@@ -185,3 +186,50 @@ def test_created_notification_status_is_pending(client: TestClient) -> None:
 
     assert response.status_code == 201
     assert response.json()["status"] == "pending"
+
+
+def test_retry_failed_notification_resets_to_pending_without_resetting_attempt_count(
+    client: TestClient,
+    db_session_factory: sessionmaker[Session],
+) -> None:
+    with db_session_factory() as db:
+        notification = Notification(
+            idempotency_key="retry-me",
+            source_system="order-service",
+            event_type="order.paid",
+            target_url="https://vendor.example.com/api/notify",
+            method="POST",
+            headers={},
+            body={"order_id": "123"},
+            status=NotificationStatus.FAILED.value,
+            attempt_count=5,
+            max_attempts=5,
+            last_error="HTTP 503",
+        )
+        db.add(notification)
+        db.commit()
+        db.refresh(notification)
+        notification_id = notification.id
+
+    response = client.post(f"/notifications/{notification_id}/retry")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "pending"
+    with db_session_factory() as db:
+        updated = db.get(Notification, notification_id)
+
+    assert updated is not None
+    assert updated.status == NotificationStatus.PENDING.value
+    assert updated.attempt_count == 5
+    assert updated.next_retry_at is not None
+    assert updated.last_error is None
+
+
+def test_retry_non_failed_notification_returns_conflict(
+    client: TestClient,
+) -> None:
+    create_response = client.post("/notifications", json=notification_payload())
+
+    response = client.post(f"/notifications/{create_response.json()['id']}/retry")
+
+    assert response.status_code == 409
