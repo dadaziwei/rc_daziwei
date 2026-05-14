@@ -1,11 +1,4 @@
-from fastapi.testclient import TestClient
-
-from notification_service.main import app
-
-
-def test_health_returns_ok() -> None:
-    client = TestClient(app)
-
+def test_health_returns_ok(client) -> None:
     response = client.get("/health")
 
     assert response.status_code == 200

@@ -1,5 +1,7 @@
 from fastapi import FastAPI
 
+from notification_service.api import router as api_router
+
 
 def create_app() -> FastAPI:
     app = FastAPI(
@@ -10,6 +12,8 @@ def create_app() -> FastAPI:
     @app.get("/health")
     def health() -> dict[str, str]:
         return {"status": "ok"}
+
+    app.include_router(api_router)
 
     return app
 

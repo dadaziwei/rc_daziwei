@@ -6,7 +6,7 @@
 
 ## Quick Start
 
-当前代码骨架只实现了健康检查接口，暂未实现 notification 业务逻辑和 worker。
+当前版本实现了健康检查接口和 notification 创建接口。API 只负责持久化通知任务，不会直接调用外部供应商 API；worker 暂未实现。
 
 环境要求：
 
@@ -35,6 +35,40 @@ curl http://localhost:8000/health
 ```json
 {"status":"ok"}
 ```
+
+创建 notification：
+
+```bash
+curl -X POST http://localhost:8000/notifications \
+  -H "Content-Type: application/json" \
+  -d '{
+    "idempotency_key": "order-123-inventory-notify",
+    "source_system": "order-service",
+    "event_type": "order.paid",
+    "target_url": "https://vendor.example.com/api/notify",
+    "method": "POST",
+    "headers": {
+      "X-Source": "order-service"
+    },
+    "body": {
+      "order_id": "123",
+      "sku": "A001",
+      "quantity": 1
+    }
+  }'
+```
+
+首次创建返回 `201 Created`：
+
+```json
+{
+  "id": 1,
+  "status": "pending",
+  "created_at": "2026-05-14T14:00:00Z"
+}
+```
+
+如果 `idempotency_key` 已存在，接口不会创建新记录，而是返回已有 notification。第一版只支持 `method = "POST"`，`target_url` 必须是 `http` 或 `https`。
 
 常用命令：
 

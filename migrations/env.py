@@ -5,6 +5,7 @@ from sqlalchemy import engine_from_config, pool
 
 from notification_service.config import get_settings
 from notification_service.database import Base
+from notification_service import models  # noqa: F401
 
 config = context.config
 
