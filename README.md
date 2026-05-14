@@ -4,6 +4,47 @@
 
 第一版重点不是覆盖所有生产能力，而是在控制复杂度的前提下，把可靠投递系统的核心链路做扎实：持久化、幂等创建、异步投递、失败重试、状态查询和投递历史记录。
 
+## Quick Start
+
+当前代码骨架只实现了健康检查接口，暂未实现 notification 业务逻辑和 worker。
+
+环境要求：
+
+- Python 3.11+
+- Docker Compose
+
+本地启动：
+
+```bash
+cp .env.example .env
+make install
+make db-up
+make migrate
+make test
+make run
+```
+
+健康检查：
+
+```bash
+curl http://localhost:8000/health
+```
+
+预期响应：
+
+```json
+{"status":"ok"}
+```
+
+常用命令：
+
+- `make install`: 安装本地开发依赖。
+- `make test`: 运行 pytest。
+- `make run`: 启动 FastAPI 开发服务。
+- `make db-up`: 启动本地 PostgreSQL。
+- `make db-down`: 停止本地 Docker Compose 服务。
+- `make migrate`: 执行 Alembic migration。
+
 ## 1. Problem Understanding
 
 这是一个内部 outbound HTTP notification delivery service。内部业务系统不会直接调用外部供应商 API，而是向本服务提交通知任务，例如某个业务事件需要同步给供应商。
