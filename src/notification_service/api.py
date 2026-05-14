@@ -1,3 +1,5 @@
+from datetime import UTC, datetime
+
 from fastapi import APIRouter, Depends, Response, status
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -8,6 +10,10 @@ from notification_service.models import Notification
 from notification_service.schemas import NotificationCreate, NotificationResponse
 
 router = APIRouter()
+
+
+def utc_now() -> datetime:
+    return datetime.now(UTC)
 
 
 def create_or_get_notification(
@@ -29,6 +35,7 @@ def create_or_get_notification(
         headers=payload.headers,
         body=payload.body,
         status="pending",
+        next_retry_at=utc_now(),
     )
     db.add(notification)
 

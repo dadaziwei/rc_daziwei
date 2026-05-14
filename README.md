@@ -6,7 +6,7 @@
 
 ## Quick Start
 
-当前版本实现了健康检查接口和 notification 创建接口。API 只负责持久化通知任务，不会直接调用外部供应商 API；worker 暂未实现。
+当前版本实现了健康检查接口、notification 创建接口和 Delivery Worker MVP。API 只负责持久化通知任务，不会直接调用外部供应商 API；外部投递由 worker 执行。
 
 环境要求：
 
@@ -69,6 +69,14 @@ curl -X POST http://localhost:8000/notifications \
 ```
 
 如果 `idempotency_key` 已存在，接口不会创建新记录，而是返回已有 notification。第一版只支持 `method = "POST"`，`target_url` 必须是 `http` 或 `https`。
+
+执行一次 worker polling：
+
+```bash
+python -m notification_service.cli worker --limit 10
+```
+
+Worker 会查询 `status = pending` 且 `next_retry_at <= now` 的 notification，按 `target_url` 发起 HTTP POST，并根据结果更新 notification 状态和写入 `delivery_attempts`。当前 worker 是简单单进程 polling；未来多 worker 并发领取任务时，可以把任务选择逻辑演进为 `FOR UPDATE SKIP LOCKED`。
 
 常用命令：
 
@@ -167,7 +175,7 @@ PostgreSQL 是 system of record。它保存通知任务当前状态、重试调�
 成功：
 
 - HTTP `2xx` 视为投递成功。
-- 成功后 notification 状态进入 `succeeded`，不再重试。
+- 成功后 notification 状态进入 `success`，不再重试。
 
 可重试失败：
 
@@ -179,6 +187,14 @@ PostgreSQL 是 system of record。它保存通知任务当前状态、重试调�
 
 这些场景通常代表临时性问题。系统会记录 attempt，并根据简单指数退避计算 `next_retry_at`。重试必须有最大次数，不能无限重试。
 
+当前退避策略：
+
+- 第 1 次失败后：1 minute。
+- 第 2 次失败后：5 minutes。
+- 第 3 次失败后：15 minutes。
+- 第 4 次失败后：1 hour。
+- 第 5 次失败后：3 hours。
+
 不可重试失败：
 
 - 大多数 HTTP `4xx` 视为 non-retryable，例如 `400`、`401`、`403`、`404`、`422`。
@@ -189,6 +205,29 @@ PostgreSQL 是 system of record。它保存通知任务当前状态、重试调�
 
 - 当 retryable failure 达到最大重试次数后，notification 进入 `failed`。
 - `failed` 不表示永远不可恢复，而是表示自动重试已经停止，后续需要人工排查或未来的手动重放能力处理。
+
+每次投递都会写入一条 `delivery_attempts` 记录，包括 `status_code`、`success`、`error_message`、截断后的 `response_body_preview` 和 `duration_ms`。Worker 不依赖日志作为唯一排查证据。
+
+### Worker MVP
+
+当前 worker 提供两个核心入口：
+
+- `process_due_notifications(limit=10)`: 查询 due notifications 并逐条处理。
+- `process_one_notification(notification_id)`: 处理指定 notification。
+
+CLI 用法：
+
+```bash
+python -m notification_service.cli worker --limit 10
+```
+
+当前版本为了保持 MVP 简单，任务选择使用普通数据库查询：
+
+```text
+status = pending AND next_retry_at <= now
+```
+
+这个结构保留了未来演进空间：当需要多个 worker 横向扩展时，可以把 due notification 选择逻辑替换为基于 PostgreSQL 行级锁的领取方式，例如 `FOR UPDATE SKIP LOCKED`，避免多个 worker 同时处理同一个 notification。
 
 ## 7. Data Model Draft
 
@@ -205,7 +244,7 @@ PostgreSQL 是 system of record。它保存通知任务当前状态、重试调�
 - `http_method`: HTTP 方法，第一版可限制为 `POST`。
 - `headers`: 需要发送给供应商的 HTTP headers，注意不能记录敏感密钥明文。
 - `payload`: 请求体 JSON。
-- `status`: 当前状态，例如 `pending`、`in_progress`、`succeeded`、`retry_scheduled`、`failed`。
+- `status`: 当前状态，例如 `pending`、`success`、`failed`。
 - `attempt_count`: 已执行投递次数。
 - `max_attempts`: 最大投递次数。
 - `next_retry_at`: 下次可投递时间。

@@ -26,6 +26,7 @@ class Notification(Base):
     body: Mapped[Any] = mapped_column(JSON, nullable=False)
     status: Mapped[str] = mapped_column(String(50), nullable=False, default="pending")
     attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    max_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=5, server_default="5")
     next_retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
